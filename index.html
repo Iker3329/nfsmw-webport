@@ -342,6 +342,12 @@ async function start() {
     canvas,
     preinitializedWebGPUDevice: device,
     noInitialRun: true,
+    locateFile(path) {
+      if (path.endsWith(".wasm")) {
+        return "https://41cfc00929e99a19b455d9c99922c451.r2.cloudflarestorage.com/nfsmw/SpeedRecomp.wasm";
+      }
+      return path;
+    },
     print: (t) => { log.push(t); console.log(t); },
     printErr: (t) => { log.push(t); console.warn(t); },
     setStatus: (t) => status(t ? t : ""),
