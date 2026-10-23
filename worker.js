@@ -119,6 +119,30 @@ async function zipSource(file) {
   return { list: async () => zip.entries(), stream: (e) => zip.stream(e) };
 }
 
+// Silent stand-in for the ~509 MB MUSIC stream. The real MW_Music.mus is not
+// shipped; we synthesize a zero-filled body of the size listed in the manifest
+// so race loads do not 404. Audio will be silent.
+function zeroBodyStream(size) {
+  const chunk = new Uint8Array(64 * 1024);
+  let remaining = size >>> 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (remaining <= 0) {
+        controller.close();
+        return;
+      }
+      const n = Math.min(chunk.byteLength, remaining);
+      controller.enqueue(n === chunk.byteLength ? chunk : chunk.subarray(0, n));
+      remaining -= n;
+    },
+  });
+}
+
+function isDummyMusicPath(path) {
+  const p = (path || "").replaceAll("\\", "/").toLowerCase();
+  return p.endsWith("sound/pfdata/mw_music.mus") || p.endsWith("/mw_music.mus") || p === "mw_music.mus";
+}
+
 // The game served by this site: the server lists the files it can serve and
 // hands out each one by path, so no folder has to be picked in the browser.
 // The boot pass copies only what the first screen needs; the rest of the
@@ -141,7 +165,17 @@ async function serverSourceFrom(game, bootOnly) {
       return dirs.includes(top) || f.path.toLowerCase() === exe;
     });
   }
-  return serverSource(base, files);
+  const source = serverSource(base, files);
+  const innerStream = source.stream.bind(source);
+  source.stream = async (entry) => {
+    const path = (entry && entry.path) || "";
+    if (isDummyMusicPath(path)) {
+      const size = (entry && entry.size) || 533877888;
+      return zeroBodyStream(size);
+    }
+    return innerStream(entry);
+  };
+  return source;
 }
 
 async function freeBytes() {

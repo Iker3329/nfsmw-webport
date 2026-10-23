@@ -232,6 +232,31 @@ async function writeOpfs(path, data) {
   await writable.close();
 }
 
+// ~509 MB of zeros for MW_Music.mus without shipping the real track pack.
+async function writeOpfsZeros(path, size) {
+  const root = await navigator.storage.getDirectory();
+  const parts = path.split("/").filter(Boolean);
+  const name = parts.pop();
+  let dir = root;
+  for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true });
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  const chunk = new Uint8Array(1024 * 1024);
+  let left = size >>> 0;
+  while (left > 0) {
+    const n = Math.min(chunk.byteLength, left);
+    await writable.write(n === chunk.byteLength ? chunk : chunk.subarray(0, n));
+    left -= n;
+  }
+  await writable.close();
+}
+
+function isDummyMusicPath(relative) {
+  const p = (relative || "").replaceAll("\\", "/").toLowerCase();
+  return p.endsWith("sound/pfdata/mw_music.mus") || p.endsWith("/mw_music.mus");
+}
+
+
 async function inStorage(path) {
   try {
     const root = await navigator.storage.getDirectory();
@@ -281,6 +306,17 @@ async function fetchFile(game, module, storagePath) {
     return;
   }
   try {
+    // Dummy silent music pack (no 500MB file in the repo)
+    if (isDummyMusicPath(relative)) {
+      const entry = manifestFiles.find((e) => !e.isDir && e.path === relative);
+      const size = (entry && entry.size) || 533877888;
+      status(`Creating silent music placeholder…\n${(size / (1024 * 1024)).toFixed(0)} MB`);
+      await writeOpfsZeros(gameStoragePath(game, relative), size);
+      console.log(`[stream] ${relative} (dummy zeros, ${size} bytes)`);
+      status("");
+      wakeGuest(module, true);
+      return;
+    }
     const url = game.server_base + relative.split("/").map(encodeURIComponent).join("/");
     const response = await fetch(url);
     if (!response.ok) throw new Error(`${url} returned ${response.status}`);
