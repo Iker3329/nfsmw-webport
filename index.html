@@ -17,11 +17,40 @@
 <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
 <title>Need for Speed: Most Wanted</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; }
-  #canvas { display: block; width: 100vw; height: 100vh; outline: none; }
-  #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-            text-align: center; padding: 0 16px; white-space: pre-line; pointer-events: none; }
-  #status a { pointer-events: auto; color: #8cf; }
+html, body {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  background: #000;
+  color: #ddd;
+  font: 14px system-ui, sans-serif;
+  overflow: hidden;
+}
+#canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: fill;
+  outline: none;
+  cursor: none; /* optional: hide OS cursor while playing */
+}
+#status {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 16px;
+  white-space: pre-line;
+  pointer-events: none;
+  z-index: 10;
+}
+#status a { pointer-events: auto; color: #8cf; }
 </style>
 </head>
 <body>
@@ -405,7 +434,47 @@ async function start() {
 }
 
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-canvas.addEventListener("click", () => canvas.focus());
+
+function lockPointer() {
+  if (document.pointerLockElement !== canvas) {
+    canvas.requestPointerLock?.();
+  }
+}
+
+function goFullscreen() {
+  const el = document.documentElement;
+  if (!document.fullscreenElement) {
+    el.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+  }
+}
+
+// Click = focus + capture mouse (required: must be a user gesture)
+canvas.addEventListener("click", () => {
+  canvas.focus();
+  lockPointer();
+});
+
+// Double-click = fullscreen + pointer lock
+canvas.addEventListener("dblclick", () => {
+  goFullscreen();
+  lockPointer();
+});
+
+// F for fullscreen, Escape leaves pointer lock (browser default) — click again to re-lock
+window.addEventListener("keydown", (e) => {
+  if (e.code === "KeyF" && !e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else goFullscreen();
+    lockPointer();
+  }
+});
+
+// If the game or browser drops pointer lock, one click brings it back
+document.addEventListener("pointerlockchange", () => {
+  // no-op; user clicks canvas to re-lock
+});
+
 start().catch((e) => status(e.message, true));
 </script>
 </body>
