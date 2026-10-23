@@ -101,23 +101,47 @@ function call(cmd, args = {}, timeoutMs = 60000) {
   });
 }
 
-// Canvas CSS already fills the viewport (100vw × 100vh). The backing-store
-// size is chosen from the window so the image stretches cleanly to any screen
-// resolution while staying within a sensible pixel budget (avoids 4K/hidpi
-// overdraw). Raise MAX_* if you want sharper output on large monitors.
+// Render buffer tracks window aspect (capped for performance). CSS keeps the
+// element fullscreen. The runtime often overwrites canvas style to match the
+// buffer size — forceCanvasLayout undoes that so the image fills the monitor
+// and mouse mapping covers the whole window.
 const MAX_PIXELS_W = 2560, MAX_PIXELS_H = 1440;
+
+function forceCanvasLayout() {
+  canvas.style.setProperty("width", "100vw", "important");
+  canvas.style.setProperty("height", "100vh", "important");
+  canvas.style.setProperty("max-width", "none", "important");
+  canvas.style.setProperty("max-height", "none", "important");
+  canvas.style.setProperty("position", "fixed", "important");
+  canvas.style.setProperty("left", "0", "important");
+  canvas.style.setProperty("top", "0", "important");
+  canvas.style.setProperty("right", "0", "important");
+  canvas.style.setProperty("bottom", "0", "important");
+  canvas.style.setProperty("margin", "0", "important");
+  canvas.style.setProperty("object-fit", "fill", "important");
+}
+
 function capCanvas() {
-  const w = Math.max(320, window.innerWidth);
-  const h = Math.max(240, window.innerHeight);
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(320, window.innerWidth * dpr);
+  const h = Math.max(240, window.innerHeight * dpr);
   const scale = Math.min(1, MAX_PIXELS_W / w, MAX_PIXELS_H / h);
-  const cw = Math.round(w * scale), ch = Math.round(h * scale);
+  const cw = Math.round(w * scale);
+  const ch = Math.round(h * scale);
   if (canvas.width !== cw || canvas.height !== ch) {
     canvas.width = cw;
     canvas.height = ch;
   }
+  forceCanvasLayout();
 }
+
 capCanvas();
 window.addEventListener("resize", capCanvas);
+setInterval(forceCanvasLayout, 250);
+new MutationObserver(forceCanvasLayout).observe(canvas, {
+  attributes: true,
+  attributeFilter: ["style", "width", "height"],
+});
 
 async function gameId() {
   // Single-game site: always use the id from games.json.
@@ -389,6 +413,8 @@ async function start() {
     }],
     onRuntimeInitialized() {
       status("");
+      capCanvas();
+      forceCanvasLayout();
       canvas.focus();
       Module.callMain([`--exe=${exe}`]);
     },
@@ -423,6 +449,14 @@ async function start() {
     }
   };
   window.Module = Module;
+  // Keep CSS fullscreen when the runtime tries to resize the canvas element.
+  Module.setCanvasSize = function (width, height) {
+    if (width > 0 && height > 0) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    forceCanvasLayout();
+  };
   // The environment is read when the runtime starts, which is before preRun:
   // a switch set here is the one the host sees. RECOMP_NO_STREAM turns the
   // streaming off, and the page has copied the whole installation instead.
