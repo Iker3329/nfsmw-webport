@@ -450,12 +450,11 @@ async function start() {
   };
   window.Module = Module;
   // Keep CSS fullscreen when the runtime tries to resize the canvas element.
-  Module.setCanvasSize = function (width, height) {
-    if (width > 0 && height > 0) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    forceCanvasLayout();
+  // Always keep the render buffer at the window's aspect ratio. If we accept
+  // the game's 4:3 size, CSS stretch only enlarges a pillarboxed image and the
+  // black side bars stay in the framebuffer.
+  Module.setCanvasSize = function (/* width, height */) {
+    capCanvas();
   };
   // The environment is read when the runtime starts, which is before preRun:
   // a switch set here is the one the host sees. RECOMP_NO_STREAM turns the
