@@ -3,11 +3,40 @@
     "id": "nfsmw",
     "title": "Need for Speed: Most Wanted",
     "executable": "speed.exe",
-    "sha256": "",
-    "requiredDirs": [],
-    "exclude": [],
+    "sha256": "80774c2e5d619b4f120b48d4462896fd504c263399d203a238769cffde1d253c",
+    "requiredDirs": [
+      "CARS",
+      "FRONTEND",
+      "GLOBAL",
+      "SOUND",
+      "TRACKS"
+    ],
+    "exclude": [
+      "Uninstall",
+      "Support",
+      "scripts",
+      "SAVE",
+      "foobar",
+      "*.dll",
+      "*_inst.exe",
+      "*.txt",
+      "server.cfg",
+      "MOVIES"
+    ],
     "store": "",
-    "installNames": [],
-    "minFreeMb": 0
+    "installNames": [
+      "Need for Speed Most Wanted",
+      "NFS Most Wanted",
+      "Most Wanted"
+    ],
+    "minFreeMb": 300,
+    "bootDirs": [
+      "GLOBAL",
+      "FRONTEND",
+      "LANGUAGES",
+      "SUBTITLES"
+    ],
+    "server_base": "gamefiles/game/",
+    "server_manifest": "gamefiles/gamedata-manifest.json"
   }
 ]
