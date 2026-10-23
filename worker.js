@@ -1,7 +1,7 @@
 // worker.js - imports, status and saves in the origin private file system
 // (OPFS), off the page's thread. Layout: /<game id>/game/... (the game, its
 // .manifest.json and .stamp) and /<game id>/profile/... (saves and settings).
-import { importGame, gameStatus, ZipReader, zipWrite, Sha256 } from "./core.js";
+import { importGame, gameStatus, ZipReader, zipWrite, Sha256, serverSource } from "./core.js";
 
 let controller = null;
 
@@ -119,6 +119,31 @@ async function zipSource(file) {
   return { list: async () => zip.entries(), stream: (e) => zip.stream(e) };
 }
 
+// The game served by this site: the server lists the files it can serve and
+// hands out each one by path, so no folder has to be picked in the browser.
+// The boot pass copies only what the first screen needs; the rest of the
+// installation is fetched by the game itself as it asks for it.
+async function serverSourceFrom(game, bootOnly) {
+  const base = game.server_base;
+  if (!base) throw new Error("this game is not served from the server");
+  // The manifest sits beside the launcher page, not inside the game folder the
+  // base URL points at, so the server tells the page where to find it.
+  const manifestUrl = game.server_manifest || (base + "gamedata-manifest.json");
+  const response = await fetch(manifestUrl);
+  if (!response.ok) throw new Error(`${manifestUrl} returned ${response.status}`);
+  const manifest = await response.json();
+  let files = manifest.files || [];
+  if (bootOnly) {
+    const dirs = (game.bootDirs || []).map((d) => d.toLowerCase());
+    const exe = (game.executable || "").toLowerCase();
+    files = files.filter((f) => {
+      const top = f.path.split("/")[0].toLowerCase();
+      return dirs.includes(top) || f.path.toLowerCase() === exe;
+    });
+  }
+  return serverSource(base, files);
+}
+
 async function freeBytes() {
   try {
     const { quota, usage } = await navigator.storage.estimate();
@@ -146,17 +171,22 @@ const handlers = {
     const persisted = await navigator.storage.persisted?.().catch(() => false);
     return { status, estimate, persisted };
   },
-  async import({ game, kind, files, handle, file }) {
+  async import({ game, kind, files, handle, file, bootOnly }) {
     controller = new AbortController();
     let source;
     if (kind === "files") source = filesSource(files);
     else if (kind === "handle") source = await handleSource(handle);
+    else if (kind === "server") source = await serverSourceFrom(game, bootOnly);
     else source = await zipSource(file);
     const root = await dirFor(game.id + "/game");
     const outcome = await importGame(game, source, opfsStore(root), {
       signal: controller.signal,
       freeBytes: await freeBytes(),
       onProgress: (p) => postMessage({ progress: p }),
+      // The boot pass copies a part of the installation on purpose, so the
+      // folders it leaves out are expected rather than a reason to stop.
+      allowMissingDirs: !!bootOnly,
+      partial: !!bootOnly,
     });
     controller = null;
     return outcome;

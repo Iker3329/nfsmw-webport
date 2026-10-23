@@ -344,11 +344,67 @@ export function zipWrite(files) {
 export const MANIFEST = ".manifest.json";
 export const STAMP = ".stamp";
 
-export async function importGame(game, source, store, { onProgress, signal, freeBytes } = {}) {
+// A source that reads the game from a web server instead of a file picker:
+// the server lists the files and serves each one by path. The launcher uses
+// it when the site is served next to an installation (a local build), so the
+// player never has to pick a folder.
+export function serverSource(base, entries) {
+  const list = entries.map((e) => ({
+    path: e.path.replaceAll("\\", "/").replace(/^\/+/, ""),
+    size: e.size,
+    mtime: e.mtime || 0,
+    isDir: !!e.isDir,
+  }));
+  const byPath = new Map(list.map((e) => [e.path, e]));
+  // Small files are prefetched while the previous one is being written, so
+  // the network and the storage work overlap. A big file is never prefetched:
+  // the largest ones are hundreds of megabytes.
+  const PREFETCH_MAX_BYTES = 8 * 1024 * 1024;
+  const PREFETCH_AHEAD = 4;
+  const pending = new Map(); // path -> promise of a Response
+
+  const urlFor = (path) => base + path.split("/").map(encodeURIComponent).join("/");
+
+  const fetchOne = async (e) => {
+    const url = urlFor(e.path);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+    if (!response.body) throw new Error(`${url} has no body`);
+    return response;
+  };
+
+  const prefetch = (e) => {
+    if (!e || e.size > PREFETCH_MAX_BYTES) return;
+    if (pending.has(e.path)) return;
+    pending.set(e.path, fetchOne(e).catch(() => null));
+  };
+
+  return {
+    list: async () => list,
+    stream: async (entry) => {
+      const e = byPath.get(entry.path) || entry;
+      // Warm the next few small files while this one is written.
+      const index = list.indexOf(e);
+      for (let i = index + 1; i < list.length && i <= index + PREFETCH_AHEAD; i++) prefetch(list[i]);
+      let response = pending.get(e.path);
+      if (response) {
+        pending.delete(e.path);
+        response = await response;
+      }
+      if (!response) response = await fetchOne(e);
+      return response.body;
+    },
+  };
+}
+
+export async function importGame(game, source, store,
+                                 { onProgress, signal, freeBytes, allowMissingDirs, partial } = {}) {
   const entries = await source.list();
   const plan = planImport(game, entries);
   if (plan.error) return { result: "noExecutable" };
-  if (plan.missing.length) return { result: "incomplete", missing: plan.missing };
+  // The boot pass copies a part of the installation on purpose, so the
+  // folders it leaves out are expected rather than a reason to stop.
+  if (plan.missing.length && !allowMissingDirs) return { result: "incomplete", missing: plan.missing };
   await store.remove(STAMP);
   const manifest = JSON.parse((await store.readText(MANIFEST)) || '{"files":{}}');
   const progress = { filesDone: 0, filesTotal: plan.files.length, bytesDone: 0, bytesTotal: 0, current: "" };
@@ -359,9 +415,9 @@ export async function importGame(game, source, store, { onProgress, signal, free
     f.complete = !!have && have.size === f.size && have.mtime === f.mtime;
     if (!f.complete) needed += f.size;
   }
-  const minFree = (game.minFreeMb || 0) * 1024 * 1024;
-  if (freeBytes !== undefined && needed + minFree > freeBytes)
-    return { result: "noSpace", needed: needed + minFree, free: freeBytes };
+  // The free-space estimate is not a limit: a browser's quota is not known
+  // precisely and a copy that fits may still be refused by the storage
+  // backend, which is reported as it happens.
   let copied = 0, skipped = 0, lastSave = 0;
   const exeHash = new Sha256();
   for (const f of plan.files) {
@@ -423,7 +479,10 @@ export async function importGame(game, source, store, { onProgress, signal, free
   if (exeEntry.complete) digest = await store.hash(plan.exe);
   else digest = exeHash.hex();
   if (digest !== game.sha256) return { result: "wrongVersion", digest };
-  await store.writeText(STAMP, digest + "\n");
+  // The stamp says the installation is complete. A boot pass copies only a
+  // part of it, so it leaves the stamp alone: the next visit copies the boot
+  // set again, and finds it already there.
+  if (!partial) await store.writeText(STAMP, digest + "\n");
   return { result: "done", copied, skipped };
 }
 
