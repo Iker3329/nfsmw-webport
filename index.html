@@ -91,12 +91,9 @@ capCanvas();
 window.addEventListener("resize", capCanvas);
 
 async function gameId() {
-  // Standalone root deploy: always use nfsmw. When nested under a launcher
-  // the last path segment is used instead.
-  const parts = location.pathname.split("/").filter(Boolean);
-  if (parts.length && parts[parts.length - 1].includes(".")) parts.pop();
-  const fromPath = decodeURIComponent(parts[parts.length - 1] || "");
-  return fromPath || "nfsmw";
+  // Single-game site: always use the id from games.json.
+  // (Path segment would be the repo name "nfsmw-webport" on GitHub Pages.)
+  return "nfsmw";
 }
 
 // The copy's progress, in the status line.
