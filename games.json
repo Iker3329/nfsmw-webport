@@ -1,0 +1,13 @@
+[
+  {
+    "id": "nfsmw",
+    "title": "Need for Speed: Most Wanted",
+    "executable": "speed.exe",
+    "sha256": "",
+    "requiredDirs": [],
+    "exclude": [],
+    "store": "",
+    "installNames": [],
+    "minFreeMb": 0
+  }
+]

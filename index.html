@@ -1,0 +1,408 @@
+<!doctype html>
+<!-- The player page for one game's web build. tools/web_launcher.py places it,
+     with SpeedRecomp.js/.wasm/.data, in <launcher>/<game id>/. The page copies the
+     part of the game the first screen needs into the browser's private
+     storage at <game id>/game, then runs the game; the rest of the
+     installation is fetched from the server as the game asks for it, and the
+     profile lives at <game id>/profile. The page must be served cross-origin
+     isolated (COOP same-origin, COEP require-corp). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Required for SharedArrayBuffer / pthreads / WebGPU isolation.
+     GitHub Pages cannot set response headers; use Netlify, Cloudflare Pages,
+     or a host that supports COOP/COEP, or serve locally with those headers. -->
+<meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+<meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+<title>Need for Speed: Most Wanted</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; }
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+  #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+            text-align: center; padding: 0 16px; white-space: pre-line; pointer-events: none; }
+  #status a { pointer-events: auto; color: #8cf; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1"></canvas>
+<div id="status">Loading…</div>
+<script type="module">
+import { humanBytes } from "./core.js";
+
+const statusEl = document.getElementById("status");
+const canvas = document.getElementById("canvas");
+function status(text, back) {
+  statusEl.textContent = text;
+  statusEl.hidden = !text;
+}
+const log = [];
+window.recompLog = log; // for tests
+
+// The worker copies the game into the browser's storage. It runs there because
+// only a worker may write to the origin private file system with a
+// synchronous access handle.
+const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+let nextId = 1;
+const pending = new Map();
+let onProgress = null;
+worker.onmessage = ({ data }) => {
+  if (data.progress) {
+    onProgress && onProgress(data.progress);
+    return;
+  }
+  const p = pending.get(data.id);
+  if (!p) return;
+  pending.delete(data.id);
+  data.error ? p.reject(new Error(data.error)) : p.resolve(data.result);
+};
+function call(cmd, args = {}, timeoutMs = 60000) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`the browser's storage did not answer "${cmd}" in ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+    pending.set(id, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
+    worker.postMessage({ id, cmd, ...args });
+  });
+}
+
+// Canvas CSS already fills the viewport (100vw × 100vh). The backing-store
+// size is chosen from the window so the image stretches cleanly to any screen
+// resolution while staying within a sensible pixel budget (avoids 4K/hidpi
+// overdraw). Raise MAX_* if you want sharper output on large monitors.
+const MAX_PIXELS_W = 1920, MAX_PIXELS_H = 1080;
+function capCanvas() {
+  const w = Math.max(320, window.innerWidth);
+  const h = Math.max(240, window.innerHeight);
+  const scale = Math.min(1, MAX_PIXELS_W / w, MAX_PIXELS_H / h);
+  const cw = Math.round(w * scale), ch = Math.round(h * scale);
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width = cw;
+    canvas.height = ch;
+  }
+}
+capCanvas();
+window.addEventListener("resize", capCanvas);
+
+async function gameId() {
+  // Standalone root deploy: always use nfsmw. When nested under a launcher
+  // the last path segment is used instead.
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts.length && parts[parts.length - 1].includes(".")) parts.pop();
+  const fromPath = decodeURIComponent(parts[parts.length - 1] || "");
+  return fromPath || "nfsmw";
+}
+
+// The copy's progress, in the status line.
+function reportCopy(p, label) {
+  const done = p.bytesTotal ? Math.round((p.bytesDone / p.bytesTotal) * 100) : 0;
+  status(`${label}: ${done}%\n${p.filesDone} / ${p.filesTotal} files, ` +
+         `${humanBytes(p.bytesDone)} of ${humanBytes(p.bytesTotal)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming: the game fetches the files it opens from the server
+// ---------------------------------------------------------------------------
+
+// What the server holds: every file of the installation, and every folder,
+// so a listing can be answered without asking the server again.
+let manifestFiles = [];
+let manifestFolders = new Set();
+
+async function loadManifest(game) {
+  if (!game.server_manifest) return;
+  try {
+    const response = await fetch(game.server_manifest);
+    if (!response.ok) throw new Error(`${game.server_manifest} returned ${response.status}`);
+    const manifest = await response.json();
+    manifestFiles = manifest.files || [];
+    manifestFolders = new Set();
+    for (const entry of manifestFiles) {
+      if (!entry.isDir) continue;
+      manifestFolders.add(entry.path);
+      // Every folder of the installation is a name in its parent.
+      const cut = entry.path.lastIndexOf("/");
+      if (cut > 0) manifestFolders.add(entry.path.slice(0, cut));
+    }
+  } catch (e) {
+    console.warn(`[stream] the manifest is not available: ${e.message}`);
+  }
+}
+
+// Where the game's own files live in the browser's storage: the same place
+// the copy puts them, so a streamed file and a copied one are the same file.
+function gameStoragePath(game, relative) {
+  return game.id + "/game/" + relative;
+}
+
+// The game's own path for a path in the browser's storage, or null when the
+// path is not under the game's folder (the profile, for instance).
+function gameRelativePath(game, storagePath) {
+  const rel = storagePath.replace(/^\/opfs\//, "");
+  const prefix = game.id + "/game";
+  if (rel === prefix) return "";
+  if (rel.startsWith(prefix + "/")) return rel.slice(prefix.length + 1);
+  return null;
+}
+
+// The names directly in a folder of the installation, as the server has them.
+function namesInFolder(relative) {
+  const prefix = relative ? relative + "/" : "";
+  const names = [];
+  const seen = new Set();
+  for (const entry of manifestFiles) {
+    if (!entry.path.startsWith(prefix)) continue;
+    const rest = entry.path.slice(prefix.length);
+    if (!rest || rest.includes("/")) continue; // only what is in here
+    if (seen.has(rest)) continue;
+    seen.add(rest);
+    names.push(rest);
+  }
+  return names;
+}
+
+// Write a file into the browser's private storage. The page may do this: the
+// synchronous access handle is a worker's privilege, but a writable stream is
+// not.
+async function writeOpfs(path, data) {
+  const root = await navigator.storage.getDirectory();
+  const parts = path.split("/").filter(Boolean);
+  const name = parts.pop();
+  let dir = root;
+  for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true });
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  await writable.write(data);
+  await writable.close();
+}
+
+async function inStorage(path) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    let dir = root;
+    const parts = path.split("/").filter(Boolean);
+    const name = parts.pop();
+    for (const p of parts) dir = await dir.getDirectoryHandle(p);
+    await dir.getFileHandle(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Release the guest: it waits while the page fetches. Emscripten exposes a
+// C++ export under a leading underscore on the JavaScript side, so both names
+// are tried - getting this wrong leaves the game waiting for an answer that
+// never comes.
+function wakeGuest(module, ok) {
+  const wake = module.recomp_web_stream_ready || module._recomp_web_stream_ready;
+  if (!wake) {
+    console.error("[stream] the game's wake function is missing: the game will wait");
+    return;
+  }
+  wake(ok ? 1 : 0);
+}
+
+// The game asks for a file it does not have. The page fetches it from the
+// server that serves the installation, writes it into the storage, and lets
+// the guest go on.
+async function fetchFile(game, module, storagePath) {
+  const relative = gameRelativePath(game, storagePath);
+  if (relative === null) {
+    wakeGuest(module, false);
+    return;
+  }
+  // The server holds nothing under that name: the game is told so at once
+  // instead of waiting for a request that cannot succeed.
+  const known = manifestFiles.some((e) => !e.isDir && e.path === relative);
+  if (!known) {
+    console.warn(`[stream] the server has no ${relative}`);
+    wakeGuest(module, false);
+    return;
+  }
+  if (await inStorage(gameStoragePath(game, relative))) {
+    wakeGuest(module, true);
+    return;
+  }
+  try {
+    const url = game.server_base + relative.split("/").map(encodeURIComponent).join("/");
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+    const data = await response.arrayBuffer();
+    await writeOpfs(gameStoragePath(game, relative), data);
+    console.log(`[stream] ${relative} (${data.byteLength} bytes)`);
+    wakeGuest(module, true);
+  } catch (e) {
+    console.warn(`[stream] ${relative}: ${e.message}`);
+    wakeGuest(module, false);
+  }
+}
+
+// The game finds its files by searching folders, so a folder has to look
+// complete even though the browser holds only part of the game. The names are
+// answered from the list the page already has; the files themselves are
+// fetched when the game opens them.
+//
+// The names are written into a buffer in the game's memory, which the guest
+// waits on, and the guest walks them.
+function listDir(game, module, storagePath, bufferPtr, capacity) {
+  const relative = gameRelativePath(game, storagePath);
+  if (relative === null) {
+    // Not the game's folder: the guest's own filesystem answers it.
+    wakeGuest(module, false);
+    return;
+  }
+  const names = namesInFolder(relative);
+  // A view over the whole memory, and not the exported one: the memory grows,
+  // and the exported view keeps the length it had when it was made.
+  const heap = new Uint8Array(module.HEAPU8.buffer);
+  const end = bufferPtr + capacity - 1;
+  let at = bufferPtr;
+  for (const name of names) {
+    if (at + name.length + 1 >= end) break;
+    for (let i = 0; i < name.length; i++) heap[at++] = name.charCodeAt(i) & 0xff;
+    heap[at++] = 0;
+  }
+  heap[at] = 0; // the end of the list
+  console.log(`[stream] ${relative || "."}: ${names.length} entries`);
+  wakeGuest(module, true);
+}
+
+// The game must be in the browser's storage before it can run. A site served
+// next to an installation has it on the server: the page copies the part the
+// first screen needs, and the game fetches the rest as it asks for it.
+//
+// ?full=1 copies the whole installation instead and turns the streaming off,
+// for a link too slow to fetch files one at a time while the game runs.
+const FULL_COPY = new URLSearchParams(location.search).get("full") === "1";
+
+async function ensureGame(game) {
+  const { status: state } = await call("status", { game });
+  if (state.state === "ready") return;
+  if (!game.server_base) {
+    // Nothing to copy from. The game starts anyway and says what it cannot
+    // find; the page has nothing better to say than that.
+    console.warn(`[copy] ${game.title} is not in this browser's storage and no server holds it`);
+    return;
+  }
+  const started = performance.now();
+  onProgress = (p) => reportCopy(p, "Copying the game");
+  let result;
+  try {
+    // Only the boot set is copied: the folders the first screen needs. The
+    // rest of the installation is fetched by the game itself, one file at a
+    // time, while it runs.
+    result = await call("import", { game, kind: "server", bootOnly: !FULL_COPY }, 60 * 60 * 1000);
+  } finally {
+    onProgress = null;
+  }
+  if (result.result !== "done")
+    throw new Error(`The copy failed: ${result.result}`);
+  console.log(`[copy] the game in ${((performance.now() - started) / 1000).toFixed(1)}s`);
+  status("Starting the game…");
+}
+
+async function start() {
+  if (!crossOriginIsolated) throw new Error("This page must be served cross-origin isolated (COOP/COEP headers).");
+  if (!navigator.gpu) throw new Error("This browser has no WebGPU.");
+  const id = await gameId();
+  const games = await fetch("./games.json").then((r) => r.json());
+  const game = games.find((g) => g.id === id);
+  if (!game) throw new Error(`No game "${id}" in the launcher's games.json.`);
+  document.title = game.title;
+
+  status("Preparing the game…");
+  // The list of what the server holds is needed before the game starts: the
+  // game asks for folders and files the moment it looks at them.
+  await loadManifest(game);
+  await ensureGame(game);
+
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  if (!adapter) throw new Error("WebGPU gave no adapter.");
+  const wanted = ["texture-compression-bc", "depth32float-stencil8", "float32-filterable",
+                  "unorm16-texture-formats", "rg11b10ufloat-renderable"];
+  const requiredFeatures = wanted.filter((f) => adapter.features.has(f));
+  const requiredLimits = {};
+  for (const k of ["maxTextureDimension2D", "maxBufferSize", "maxStorageBufferBindingSize",
+                   "maxUniformBufferBindingSize", "maxBindGroups", "maxSampledTexturesPerShaderStage",
+                   "maxSamplersPerShaderStage", "maxStorageBuffersPerShaderStage",
+                   "maxUniformBuffersPerShaderStage", "maxDynamicUniformBuffersPerPipelineLayout",
+                   "maxVertexBuffers", "maxVertexAttributes", "maxColorAttachments",
+                   "maxInterStageShaderVariables"])
+    if (k in adapter.limits) requiredLimits[k] = adapter.limits[k];
+  const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+  device.lost.then((info) => status(`The graphics device was lost: ${info.message}`, true));
+  device.addEventListener("uncapturederror", (e) => console.error("WebGPU:", e.message));
+
+  const exe = `/opfs/${id}/game/${game.executable}`;
+  const Module = {
+    canvas,
+    preinitializedWebGPUDevice: device,
+    noInitialRun: true,
+    print: (t) => { log.push(t); console.log(t); },
+    printErr: (t) => { log.push(t); console.warn(t); },
+    setStatus: (t) => status(t ? t : ""),
+    onAbort: (what) => status(`The game stopped: ${what}`, true),
+    preRun: [() => {
+      const m = Module;
+      m.ENV.RECOMP_PROFILE_DIR = `/opfs/${id}/profile`;
+      const extra = new URLSearchParams(location.search);
+      for (const [k, v] of extra) if (k.startsWith("RECOMP_")) m.ENV[k] = v;
+    }],
+    onRuntimeInitialized() {
+      status("");
+      canvas.focus();
+      Module.callMain([`--exe=${exe}`]);
+    },
+  };
+  // The game fetches the files it asks for. It runs on a worker, whose Module
+  // is not the page's, so the request arrives here as a message and the
+  // answer goes back the same way.
+  //
+  // A worker's message is delivered to the Worker object and not to the
+  // window, and the runtime's own handler takes it: it knows the commands the
+  // workers send it and drops the rest. So the page watches the workers the
+  // runtime creates, and the window listener is for a build that runs the
+  // game on this thread.
+  const onStreamMessage = (data) => {
+    if (!data || data.type !== "recomp-stream") return;
+    try {
+      if (data.kind === 0) fetchFile(game, Module, data.path);
+      else listDir(game, Module, data.path, data.names, data.capacity);
+    } catch (e) {
+      // A failure here must not leave the guest waiting: it would sit there
+      // until the request times out, and the game would look frozen.
+      console.warn(`[stream] ${e.message}`);
+      wakeGuest(Module, false);
+    }
+  };
+  window.addEventListener("message", (event) => onStreamMessage(event.data));
+  const NativeWorker = window.Worker;
+  window.Worker = class extends NativeWorker {
+    constructor(...args) {
+      super(...args);
+      this.addEventListener("message", (event) => onStreamMessage(event.data));
+    }
+  };
+  window.Module = Module;
+  // The environment is read when the runtime starts, which is before preRun:
+  // a switch set here is the one the host sees. RECOMP_NO_STREAM turns the
+  // streaming off, and the page has copied the whole installation instead.
+  if (FULL_COPY) Module.ENV.RECOMP_NO_STREAM = "1";
+  const script = document.createElement("script");
+  script.src = "SpeedRecomp.js";
+  script.onerror = () => status("The game's web build is missing.", true);
+  document.body.append(script);
+}
+
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("click", () => canvas.focus());
+start().catch((e) => status(e.message, true));
+</script>
+</body>
+</html>
