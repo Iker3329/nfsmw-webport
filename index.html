@@ -105,7 +105,7 @@ function call(cmd, args = {}, timeoutMs = 60000) {
 // size is chosen from the window so the image stretches cleanly to any screen
 // resolution while staying within a sensible pixel budget (avoids 4K/hidpi
 // overdraw). Raise MAX_* if you want sharper output on large monitors.
-const MAX_PIXELS_W = 1920, MAX_PIXELS_H = 1080;
+const MAX_PIXELS_W = 2560, MAX_PIXELS_H = 1440;
 function capCanvas() {
   const w = Math.max(320, window.innerWidth);
   const h = Math.max(240, window.innerHeight);
