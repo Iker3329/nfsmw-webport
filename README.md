@@ -5,3 +5,4 @@ Changes on this are:
 -Canvas stretch to your screen no matter the resolution
 -Mouse now locks when clicking the screen, press escape to unlock it
 -Double click goes on fullscreen, hold escape to get out of it
+-Music is removed making the game file size lower and download a lot faster
