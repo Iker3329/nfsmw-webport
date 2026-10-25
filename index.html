@@ -360,37 +360,91 @@ function listDir(game, module, storagePath, bufferPtr, capacity) {
   wakeGuest(module, true);
 }
 
-// The game must be in the browser's storage before it can run. A site served
-// next to an installation has it on the server: the page copies the part the
-// first screen needs, and the game fetches the rest as it asks for it.
-//
-// ?full=1 copies the whole installation instead and turns the streaming off,
-// for a link too slow to fetch files one at a time while the game runs.
-const FULL_COPY = new URLSearchParams(location.search).get("full") === "1";
+// Split zip install: gamefiles/gamedata.zip.001 … gamedata.zip.NNN are
+// downloaded, concatenated into one ZIP, and extracted into OPFS
+// (<game id>/game/). After that the game runs fully offline from OPFS.
+const ZIP_PART_COUNT = Number(new URLSearchParams(location.search).get("parts")) || 44;
+const ZIP_PART_BASE = "gamefiles/gamedata.zip.";
+
+function zipPartUrl(index) {
+  // 1 -> gamedata.zip.001
+  return ZIP_PART_BASE + String(index).padStart(3, "0");
+}
+
+async function downloadZipParts(partCount) {
+  const blobs = [];
+  let bytes = 0;
+  for (let i = 1; i <= partCount; i++) {
+    const url = zipPartUrl(i);
+    status(
+      `Downloading game data…\nPart ${i} / ${partCount}` +
+      (bytes ? `\n${humanBytes(bytes)} so far` : "")
+    );
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(
+        `Missing ${url} (${response.status}). ` +
+        `Upload parts gamedata.zip.001 … gamedata.zip.${String(partCount).padStart(3, "0")} into gamefiles/.`
+      );
+    }
+    const blob = await response.blob();
+    if (!blob.size) throw new Error(`${url} is empty`);
+    blobs.push(blob);
+    bytes += blob.size;
+    console.log(`[zip] part ${i}/${partCount}: ${humanBytes(blob.size)} (total ${humanBytes(bytes)})`);
+  }
+  status(`Assembling ZIP…\n${humanBytes(bytes)} in ${partCount} parts`);
+  return new Blob(blobs, { type: "application/zip" });
+}
 
 async function ensureGame(game) {
   const { status: state } = await call("status", { game });
-  if (state.state === "ready") return;
-  if (!game.server_base) {
-    // Nothing to copy from. The game starts anyway and says what it cannot
-    // find; the page has nothing better to say than that.
-    console.warn(`[copy] ${game.title} is not in this browser's storage and no server holds it`);
+  if (state.state === "ready") {
+    console.log("[copy] game already in OPFS");
     return;
   }
+
   const started = performance.now();
-  onProgress = (p) => reportCopy(p, "Copying the game");
+  const zipBlob = await downloadZipParts(ZIP_PART_COUNT);
+  // Worker ZipReader expects something File-like; Blob is enough.
+  const zipFile = new File([zipBlob], "gamedata.zip", { type: "application/zip" });
+
+  onProgress = (p) => reportCopy(p, "Extracting the game");
   let result;
   try {
-    // Only the boot set is copied: the folders the first screen needs. The
-    // rest of the installation is fetched by the game itself, one file at a
-    // time, while it runs.
-    result = await call("import", { game, kind: "server", bootOnly: !FULL_COPY }, 60 * 60 * 1000);
+    result = await call(
+      "import",
+      { game, kind: "zip", file: zipFile },
+      2 * 60 * 60 * 1000
+    );
   } finally {
     onProgress = null;
   }
-  if (result.result !== "done")
-    throw new Error(`The copy failed: ${result.result}`);
-  console.log(`[copy] the game in ${((performance.now() - started) / 1000).toFixed(1)}s`);
+
+  if (result.result === "wrongVersion") {
+    throw new Error(
+      `The game EXE does not match this build (got ${result.digest || "unknown"}).`
+    );
+  }
+  if (result.result === "noExecutable") {
+    throw new Error(
+      "The ZIP has no speed.exe at the root. Zip the game folder contents " +
+      "(CARS, GLOBAL, speed.exe, …), not a parent folder."
+    );
+  }
+  if (result.result === "incomplete") {
+    throw new Error(
+      `The ZIP is missing folders: ${(result.missing || []).join(", ")}`
+    );
+  }
+  if (result.result !== "done") {
+    throw new Error(`Install failed: ${result.result}${result.error ? " — " + result.error : ""}`);
+  }
+
+  console.log(
+    `[copy] zip install in ${((performance.now() - started) / 1000).toFixed(1)}s ` +
+    `(copied ${result.copied}, skipped ${result.skipped})`
+  );
   status("Starting the game…");
 }
 
@@ -404,8 +458,7 @@ async function start() {
   document.title = game.title;
 
   status("Preparing the game…");
-  // The list of what the server holds is needed before the game starts: the
-  // game asks for folders and files the moment it looks at them.
+  // Optional: folder lists if a manifest still exists (not required for ZIP install).
   await loadManifest(game);
   await ensureGame(game);
 
@@ -443,7 +496,9 @@ async function start() {
     onAbort: (what) => status(`The game stopped: ${what}`, true),
     preRun: [() => {
       const m = Module;
+      m.ENV = m.ENV || {};
       m.ENV.RECOMP_PROFILE_DIR = `/opfs/${id}/profile`;
+      m.ENV.RECOMP_NO_STREAM = "1";
       const extra = new URLSearchParams(location.search);
       for (const [k, v] of extra) if (k.startsWith("RECOMP_")) m.ENV[k] = v;
     }],
@@ -495,7 +550,9 @@ async function start() {
   // The environment is read when the runtime starts, which is before preRun:
   // a switch set here is the one the host sees. RECOMP_NO_STREAM turns the
   // streaming off, and the page has copied the whole installation instead.
-  if (FULL_COPY) Module.ENV.RECOMP_NO_STREAM = "1";
+  // ZIP install puts the full game in OPFS; do not stream from the server.
+  Module.ENV = Module.ENV || {};
+  Module.ENV.RECOMP_NO_STREAM = "1";
   const script = document.createElement("script");
   script.src = "SpeedRecomp.js";
   script.onerror = () => status("The game's web build is missing.", true);
