@@ -363,7 +363,7 @@ function listDir(game, module, storagePath, bufferPtr, capacity) {
 // Split zip install: gamefiles/gamedata.zip.001 … gamedata.zip.NNN are
 // downloaded, concatenated into one ZIP, and extracted into OPFS
 // (<game id>/game/). After that the game runs fully offline from OPFS.
-const ZIP_PART_COUNT = Number(new URLSearchParams(location.search).get("parts")) || 44;
+const ZIP_PART_COUNT = Number(new URLSearchParams(location.search).get("parts")) || 51;
 const ZIP_PART_BASE = "gamefiles/gamedata.zip.";
 
 function zipPartUrl(index) {
